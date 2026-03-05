@@ -99,4 +99,4 @@ class CIFARResNet(nn.Module): #resnet for cifar: stem conv, 4 stages of residual
         return x #returns logits for cross entropy loss
 
 def build_model(): #factory function so train.py can call one function to construct the model
-    return CIFARResNet(num_blocks=(2, 2, 2, 2), dropout=0.0) #resnet18-style; dropout disabled 
+    return CIFARResNet(num_blocks=(2, 2, 2, 2), dropout=0.0) #resnet18-style; dropout 

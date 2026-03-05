@@ -254,13 +254,13 @@ def train(model, train_loader, val_loader, criterion, optimizer, device, ema: EM
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)  #prevents fp16 gradient underflow
 
     for epoch in range(epochs):
-        model.train()  #bn updates stats; dropout on (if used)
-        running_loss = 0.0
+        model.train()  #bn updates running mean/var
+        running_loss = 0.0 #stores sum of per-batch loss values
 
         if warmup_epochs > 0 and epoch < warmup_epochs:
             warmup_lr = base_lr * float(epoch + 1) / float(warmup_epochs)  #linear warmup
             for pg in optimizer.param_groups:
-                pg["lr"] = warmup_lr
+                pg["lr"] = warmup_lr 
 
         with tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", unit="batch") as pbar:
             for i, (images, labels) in enumerate(pbar):
@@ -317,12 +317,13 @@ def train(model, train_loader, val_loader, criterion, optimizer, device, ema: EM
     return best_val_acc
 
 
-def main():  #orchestrates config, data, model, training, and testing
-    set_seed(int(HP.get("seed", 42)))
+def main(): 
+    set_seed(int(HP.get("seed", 42))) #seed 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    print(f"Using device: {device}") #device selection
 
+    #cuda speed flags
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True  #fastest conv algorithms for fixed sizes
         torch.backends.cuda.matmul.allow_tf32 = True  #allow tf32 for speed on rtx
@@ -332,27 +333,35 @@ def main():  #orchestrates config, data, model, training, and testing
         except Exception:
             pass
 
+    #build transforms and loaders
     train_transform, test_transform = build_transforms()
     train_loader, val_loader, test_loader = get_loaders(train_transform, test_transform)
 
+    #build model
     model = build_model().to(device)
 
+    #define loss + optimizer
     criterion = nn.CrossEntropyLoss(label_smoothing=float(HP.get("label_smoothing", 0.0)))
     optimizer = make_optimizer(model)
 
+    #ema setup avergaes weight over training for more stable evaluation and better generalization; decay close to 1 means slow, smooth average
     ema = None
     if bool(HP.get("use_ema", True)):
         ema = EMA(model, decay=float(HP.get("ema_decay", 0.9999)))
 
+    #train
     best_val = train(model, train_loader, val_loader, criterion, optimizer, device, ema)
 
+    #load best checkpoint
     if os.path.exists(config["paths"]["best_model_path"]):
         model.load_state_dict(torch.load(config["paths"]["best_model_path"], map_location=device))
         print("Loaded best checkpoint for testing.")
 
+    #test evaluate
     test_loss, test_acc = evaluate(model, test_loader, criterion, device, tta=bool(HP.get("tta", False)))
     print(f"Best Val acc: {best_val:.2f}% | Test loss: {test_loss:.3f} | Test acc: {test_acc:.2f}%")
 
+    #save last model
     os.makedirs(os.path.dirname(config["paths"]["model_path"]), exist_ok=True)
     torch.save(model.state_dict(), config["paths"]["model_path"])
     print(f"Saved last model -> {config['paths']['model_path']}")

@@ -1,13 +1,37 @@
 hyperparameters:
-  epochs: 10
-  batch_size: 8
+  epochs: 200 #train long enough for full convergence (200 passes through the dataset)
+  batch_size: 128 #good gpu throughput and stable gradients (128 images per training step)
 
-  lr: 0.001
-  momentum: 0.9 
+  optimizer: "sgd" #stochastic gradient descent
+  lr: 0.1 #learning rate (step size of updates)
+  momentum: 0.9 #speeds up training and smooths optimization (doesnt get stuck in local minima)
+  nesterov: true #slightly improves momentum updates
+  weight_decay: 0.0005 #regularization to reduce overfitting (prevents weights from growing too large)
 
-  num_workers: 8
+  val_split: 0.1 #10% training set as validation
+
+  warmup_epochs: 5 #ramp up lr (0-0.1) during 5 epochs to avoid early instability
+
+  #changes target labels from 100% one class to mostly one class with some probability for others
+  label_smoothing: 0.1 #less overconfidence, better generalization
+
+  use_autoaugment: true #enable torchvision autoaugment for stronger transformations and better generalization
+  cutout_prob: 0.5 #apply cutout half the time (hide a small square region of the image to force the model to learn from multiple cues and improve robustness)
+  cutout_size: 8 #mask an 8x8 patch on 32x32 images
+
+  #exponential moving average of model weights for more stable evaluation and better generalization 
+  use_ema: true #evaluate with averages weights for better accuracy and stability
+  ema_decay: 0.9999 #slow smooth average for stable ema
+
+  #if true: evaluate image and horizontally flipped version and average predictions for better accuracy; if false: evaluate only original image for faster evaluation
+  tta: false #no test-time augmentation 
+
+  num_workers: 8 # number of cpu workers loading data in parallel
+  pin_memory: true #faster cpu->gpu transfer via cuda
+  seed: 42 #makes results reproducible
+  amp: true #automatic mixed precision for faster training and lower memory
 
 paths:
-  train_dir: 'data/cifar10/train'
-  test_dir: 'data/cifar10/test'
-  model_path: 'weights/checkpoint.pth'
+  data_dir: "data/cifar10" #dataset location (download store data)
+  model_path: "weights/last.pth" #save final epoch weights
+  best_model_path: "weights/best.pth" #save best validation checkpoint

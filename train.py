@@ -1,5 +1,5 @@
 import os  #filesystem utilities (paths, mkdir)
-import yaml  #read config.yaml into a python dict
+import yaml  #load config.yaml 
 from tqdm import tqdm  #progress bar for batches/epochs
 import random  #python rng for reproducibility
 import numpy as np  #numpy rng for reproducibility
@@ -13,34 +13,33 @@ from torchvision import datasets, transforms  #cifar10 dataset + image transform
 from model import build_model  #model factory (keeps architecture separate)
 
 
-with open("config.yaml", "r") as f:  #open the config file
-    config = yaml.safe_load(f)  #parse yaml into dict
+with open("config.yaml", "r") as f:  #open the config file in read mode
+    config = yaml.safe_load(f)  #parse yaml into dictionary
 
 HP = config["hyperparameters"]  #short alias for hyperparameters
 
+#for normalization, helps optimization
+CIFAR_MEAN = (0.4914, 0.4822, 0.4465)  #per-channel (rgb) mean for normalization
+CIFAR_STD  = (0.2023, 0.1994, 0.2010)  #per-channel (rgb) std for normalization
 
-CIFAR_MEAN = (0.4914, 0.4822, 0.4465)  #per-channel mean for normalization
-CIFAR_STD  = (0.2023, 0.1994, 0.2010)  #per-channel std for normalization
 
-
-class Cutout:  #augmentation: mask a random square patch on the tensor image
-    """zero a random square region of a tensor image (c,h,w)."""
-    def __init__(self, size=8, p=0.5):  #size is patch width/height; p is apply probability
+class Cutout:  #mask a random square patch on the tensor image with 0s
+    def __init__(self, size=8, p=0.5):  #8x8 patch size 50% of the time
         self.size = int(size)  #ensure indices are integers
         self.p = float(p)  #ensure probability is float
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:  #makes this usable inside transforms.compose
-        if self.p <= 0:  #disabled case
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:  #makes this usable inside transforms like a function
+        if self.p <= 0:  #disabled cutout
             return x
-        if torch.rand(1).item() > self.p:  #randomly skip cutout with probability (1-p)
+        if torch.rand(1).item() > self.p:  #skips cutout if random number is greater than p
             return x
 
-        _, h, w = x.shape  #x is (c,h,w); keep h,w for bounds
+        _, h, w = x.shape  #x is (c,h,w); keep h,w for mask bounds
         s = self.size
         if s <= 0:  #invalid size
             return x
 
-        cy = torch.randint(0, h, (1,)).item()  #random center y
+        cy = torch.randint(0, h, (1,)).item()  #random center y, .item converts tensor scalar to python int
         cx = torch.randint(0, w, (1,)).item()  #random center x
 
         y1 = max(0, cy - s // 2)  #top boundary, clamped
@@ -49,12 +48,12 @@ class Cutout:  #augmentation: mask a random square patch on the tensor image
         x2 = min(w, cx + s // 2)  #right boundary, clamped
 
         x[:, y1:y2, x1:x2] = 0.0  #set patch to zero (mask)
-        return x
+        return x #returns augmented image tensor
 
 
 def build_transforms():  #build train and test/val preprocessing pipelines
-    use_autoaugment = bool(HP.get("use_autoaugment", True))  #toggle strong augmentation
-    cutout = Cutout(size=HP.get("cutout_size", 8), p=HP.get("cutout_prob", 0.5))  #cutout strength
+    use_autoaugment = bool(HP.get("use_autoaugment", True))  #reads from config, toggles strong augmentation
+    cutout = Cutout(size=HP.get("cutout_size", 8), p=HP.get("cutout_prob", 0.5))  #cutout size + probability from config
 
     aug_list = [
         transforms.RandomCrop(32, padding=4),  #keep 32x32 but shift via padded crop
@@ -70,26 +69,25 @@ def build_transforms():  #build train and test/val preprocessing pipelines
         transforms.ToTensor(),  #pil -> tensor float in [0,1] with shape (c,h,w)
         cutout,  #mask after to_tensor so we can index pixels precisely
         transforms.Normalize(CIFAR_MEAN, CIFAR_STD),  #standardize inputs for stable optimization
-    ])
+    ]) #sequential pipeline applied to each training image
 
     test_transform = transforms.Compose([
         transforms.ToTensor(),  #no augmentation for fair metrics
         transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
-    ])
+    ]) #same but without augmentation for validation/testing to get true performance metrics
 
     return train_transform, test_transform
 
 
 class EMA:  #exponential moving average of trainable parameters for evaluation
-    """maintains a moving-average copy of parameters for smoother eval weights."""
     def __init__(self, model: nn.Module, decay: float = 0.9999):  #decay close to 1 means slow, smooth average
         self.decay = float(decay)
-        self.shadow = {}  #name -> ema tensor
-        self.backup = {}  #name -> original tensor copy (for restore)
+        self.shadow = {}  #stores ema weights by parameter name
+        self.backup = {}  #stores original weights temporarily during evaluation
 
         for name, p in model.named_parameters():  #iterate named parameters for consistent mapping
             if p.requires_grad:
-                self.shadow[name] = p.detach().clone()  #start ema equal to initial weights
+                self.shadow[name] = p.detach().clone()  #start ema equal to initial weights, detach from graph and clone to avoid reference issues
 
     @torch.no_grad()  #no gradients needed for ema math
     def update(self, model: nn.Module):  #call after optimizer step
@@ -151,7 +149,7 @@ def get_loaders(train_transform, test_transform):  #create dataloaders for train
         dataset_train_full,
         [n_train, n_val],
         generator=torch.Generator().manual_seed(int(HP.get("seed", 42))),  #reproducible split
-    )
+    ) #returns 2 subsets, one for validation, one for training
 
     dataset_val_full = datasets.CIFAR10(
         root=data_root,
@@ -161,8 +159,8 @@ def get_loaders(train_transform, test_transform):  #create dataloaders for train
     )
     dataset_val = torch.utils.data.Subset(dataset_val_full, dataset_val_idx.indices)  #same indices, different transform
 
-    pin = bool(HP.get("pin_memory", True))  #faster cpu->gpu copies when using cuda
-    nw = int(HP.get("num_workers", 0))  #loader worker processes
+    pin = bool(HP.get("pin_memory", True))  #pinned memory faster cpu->gpu copies when using cuda
+    nw = int(HP.get("num_workers", 0))  #number of loader worker processes
 
     train_loader = DataLoader(
         dataset_train,
@@ -212,8 +210,8 @@ def evaluate(model, dataloader, criterion, device, tta: bool = False):  #compute
 
         loss = criterion(outputs, labels)
 
-        total_loss += loss.item() * labels.size(0)  #sum loss over samples
-        preds = outputs.argmax(dim=1)  #predicted class index
+        total_loss += loss.item() * labels.size(0)  #multiply by batch size to sum loss over samples
+        preds = outputs.argmax(dim=1)  #predicted class index based on highest logit
         total += labels.size(0)
         correct += (preds == labels).sum().item()
 
@@ -223,14 +221,14 @@ def evaluate(model, dataloader, criterion, device, tta: bool = False):  #compute
 
 
 def make_optimizer(model):  #create optimizer from config
-    opt_name = HP.get("optimizer", "sgd").lower()
+    opt_name = HP.get("optimizer", "sgd").lower() #read optimizer name from config, default to sgd
     if opt_name == "sgd":
         return optim.SGD(
             model.parameters(),
-            lr=float(HP["lr"]),
-            momentum=float(HP.get("momentum", 0.9)),
-            weight_decay=float(HP.get("weight_decay", 5e-4)),
-            nesterov=bool(HP.get("nesterov", True)),
+            lr=float(HP["lr"]), #step size
+            momentum=float(HP.get("momentum", 0.9)), #momentum for smoother updates and faster convergence
+            weight_decay=float(HP.get("weight_decay", 5e-4)), #l2 regularization to prevent overfitting by penalizing large weights
+            nesterov=bool(HP.get("nesterov", True)), #use nesterov momentum for better convergence (lookahead gradient)
         )
     elif opt_name == "adamw":
         return optim.AdamW(
@@ -250,7 +248,7 @@ def train(model, train_loader, val_loader, criterion, optimizer, device, ema: EM
     base_lr = float(HP["lr"])
 
     cosine_T = max(1, epochs - warmup_epochs)  #cosine length after warmup
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_T)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_T) #cosine decays from base_lr to 0 over cosine_T epochs, restarts if T_max is reached
 
     use_amp = bool(HP.get("amp", True)) and device.type == "cuda"  #amp only makes sense on cuda
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)  #prevents fp16 gradient underflow
